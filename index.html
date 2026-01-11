@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Multi-Agent Flood Risk Analysis</title>
+    
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet.draw/1.0.4/leaflet.draw.css" />
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        body { font-family: 'Inter', sans-serif; }
+        .leaflet-container { height: 100%; width: 100%; border-radius: 0.5rem; }
+        .hidden { display: none; }
+        .spinner {
+            border: 2px solid #f3f3f3;
+            border-top: 2px solid #3498db;
+            border-radius: 50%;
+            width: 16px;
+            height: 16px;
+            animation: spin 1s linear infinite;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+    </style>
+</head>
+<body class="bg-gray-100 text-gray-800">
+
+    <div class="container mx-auto p-4 md:p-8">
+        <header class="text-center mb-8">
+            <h1 class="text-3xl md:text-4xl font-bold text-gray-900">Multi-Agent Flood Risk Workflow</h1>
+            <p class="text-gray-600 mt-2 max-w-2xl mx-auto">Draw a polygon on the map to define a region, then click "Analyze" to run the workflow.</p>
+        </header>
+
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-8">
+            <div class="bg-white p-4 rounded-lg shadow-md h-[60vh] lg:h-auto">
+                <div id="map"></div>
+            </div>
+
+            <div class="bg-white p-6 rounded-lg shadow-md">
+                <h2 class="text-2xl font-bold mb-4">Control Panel</h2>
+                <button id="analyzeBtn" class="w-full bg-blue-600 text-white font-bold py-3 px-4 rounded-lg hover:bg-blue-700 transition-colors disabled:bg-gray-400 flex items-center justify-center gap-2">
+                    Analyze Region
+                </button>
+                <button id="resetBtn" class="w-full mt-2 bg-gray-200 text-gray-700 font-bold py-3 px-4 rounded-lg hover:bg-gray-300 transition-colors flex items-center justify-center gap-2">
+                    Reset
+                </button>
+                <div id="results" class="mt-6 space-y-4">
+                    <div id="placeholder" class="text-center text-gray-500 py-10 border-2 border-dashed rounded-lg">
+                        <p>Analysis results will appear here.</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet.draw/1.0.4/leaflet.draw.js"></script>
+
+    <script>
+        // --- Map Initialization ---
+        const map = L.map('map').setView([51.509865, -0.118092], 13);
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            maxZoom: 19,
+            attribution: '© OpenStreetMap contributors'
+        }).addTo(map);
+        const drawnItems = new L.FeatureGroup();
+        map.addLayer(drawnItems);
+        const drawControl = new L.Control.Draw({
+            edit: { featureGroup: drawnItems },
+            draw: { polygon: true, polyline: false, rectangle: false, circle: false, marker: false, circlemarker: false }
+        });
+        map.addControl(drawControl);
+        let drawnPolygon = null;
+        map.on(L.Draw.Event.CREATED, (event) => {
+            const layer = event.layer;
+            drawnItems.clearLayers();
+            drawnItems.addLayer(layer);
+            drawnPolygon = layer.toGeoJSON();
+            document.getElementById('analyzeBtn').disabled = false;
+        });
+        map.on(L.Draw.Event.DELETED, () => {
+            drawnPolygon = null;
+            document.getElementById('analyzeBtn').disabled = true;
+        });
+
+        // --- Workflow Logic with FastAPI ---
+        const analyzeBtn = document.getElementById('analyzeBtn');
+        const resetBtn = document.getElementById('resetBtn');
+        const resultsDiv = document.getElementById('results');
+        const placeholderDiv = document.getElementById('placeholder');
+        
+        analyzeBtn.disabled = true;
+
+        analyzeBtn.addEventListener('click', () => {
+            if (!drawnPolygon) {
+                alert("Please draw a polygon on the map first.");
+                return;
+            }
+            
+            analyzeBtn.disabled = true;
+            analyzeBtn.innerHTML = `<div class="spinner"></div> Processing... This may take a minute.`;
+            placeholderDiv.classList.add('hidden');
+            resultsDiv.innerHTML = `<div class="p-4 border rounded-lg bg-gray-50 text-center text-gray-600">Contacting server and running analysis...</div>`;
+
+            fetch('/run-workflow', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ aoi: drawnPolygon.geometry })
+            })
+            .then(response => {
+                if (!response.ok) { throw new Error(`Server responded with status: ${response.status}`); }
+                return response.json();
+            })
+            .then(data => {
+                if (data.error) { throw new Error(data.error); }
+                displayResults(data);
+                analyzeBtn.innerHTML = `Workflow Complete`;
+            })
+            .catch(error => {
+                console.error('Workflow Error:', error);
+                resultsDiv.innerHTML = `<div class="p-4 border rounded-lg bg-red-50 text-red-700"><strong>Error:</strong> ${error.message}</div>`;
+                analyzeBtn.disabled = false;
+                analyzeBtn.innerHTML = `Analysis Failed. Try Again.`;
+            });
+        });
+        
+        resetBtn.addEventListener('click', () => {
+            drawnItems.clearLayers();
+            drawnPolygon = null;
+            analyzeBtn.disabled = true;
+            analyzeBtn.innerHTML = `Analyze Region`;
+            resultsDiv.innerHTML = '';
+            placeholderDiv.classList.remove('hidden');
+        });
+
+        function displayResults(paths) {
+            resultsDiv.innerHTML = '';
+            const resultCards = [
+                { title: 'Digital Elevation & Land Use', img1: paths.dem_map_path, img2: paths.lulc_map_path },
+                { title: 'Water Accumulation Map', img1: paths.flow_map_path },
+                { title: 'Flood Risk Map', img1: paths.risk_map_path },
+                { title: 'Proposed Drainage Strategy', img1: paths.solutions_map_path }
+            ];
+
+            resultCards.forEach(cardData => {
+                if (!cardData.img1) return;
+                const card = document.createElement('div');
+                card.className = 'p-4 border rounded-lg bg-gray-50';
+                let imagesHTML = `<img src="${cardData.img1}" alt="${cardData.title}" class="rounded-md border w-full">`;
+                if (cardData.img2) {
+                    imagesHTML = `
+                        <div class="grid grid-cols-2 gap-2">
+                            <img src="${cardData.img1}" alt="${cardData.title} 1" class="rounded-md border">
+                            <img src="${cardData.img2}" alt="${cardData.title} 2" class="rounded-md border">
+                        </div>`;
+                }
+                card.innerHTML = `<h3 class="font-bold text-lg mb-2">${cardData.title}</h3>${imagesHTML}`;
+                resultsDiv.appendChild(card);
+            });
+        }
+    </script>
+</body>
+</html>
